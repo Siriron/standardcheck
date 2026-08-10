@@ -68,7 +68,7 @@ export function TerminalScan({
             placeholder="example.com"
             spellCheck={false}
             autoComplete="off"
-            className="flex-1 min-w-[140px] bg-transparent outline-none placeholder:text-fog/50 text-paper disabled:opacity-60"
+            className="flex-1 min-w-0 basis-full sm:basis-auto bg-transparent outline-none placeholder:text-fog/50 text-paper disabled:opacity-60"
             aria-label="Domain to check"
           />
           {!isBusy && (
@@ -140,6 +140,31 @@ export function TerminalScan({
                   target="_blank"
                   rel="noreferrer"
                   className="text-fog hover:text-paper underline underline-offset-2 text-xs"
+                >
+                  view finalized transaction ↗
+                </a>
+              )}
+            </motion.div>
+          )}
+
+          {status === 'done' && !verdict && (
+            <motion.div
+              key="done-no-verdict"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col gap-1.5"
+            >
+              <span className="text-fog">
+                transaction finalized, but the verdict couldn't be read from
+                the response — check the transaction directly
+              </span>
+              {txHash && (
+                <a
+                  href={`${explorerUrl}/tx/${txHash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-beacon/80 hover:text-beacon underline underline-offset-2 text-xs"
                 >
                   view finalized transaction ↗
                 </a>
