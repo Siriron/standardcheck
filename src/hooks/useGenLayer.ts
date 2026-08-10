@@ -118,6 +118,34 @@ export function useGenLayer(network: NetworkKey) {
   // Guards against a duplicate in-flight submission from a fast double-click.
   const inFlightRef = useRef(false);
 
+  const readRecord = useCallback(
+    async (attestationId: number) => {
+      const cfg = CHAIN_CONFIGS[network];
+      if (!cfg.contractAddress) return null;
+      const client = createClient({ chain: CHAIN_OBJECTS[network] });
+      const raw = await client.readContract({
+        address: cfg.contractAddress as `0x${string}`,
+        functionName: 'get_record',
+        args: [attestationId],
+      });
+      // readContract returns a JSON string — always parse it.
+      return JSON.parse(raw as string);
+    },
+    [network]
+  );
+
+  const readNextId = useCallback(async (): Promise<number> => {
+    const cfg = CHAIN_CONFIGS[network];
+    const client = createClient({ chain: CHAIN_OBJECTS[network] });
+    const raw = await client.readContract({
+      address: cfg.contractAddress as `0x${string}`,
+      functionName: 'get_next_id',
+      args: [],
+    });
+    const { next_id } = JSON.parse(raw as string) as { next_id: number };
+    return next_id;
+  }, [network]);
+
   const checkDomain = useCallback(
     async (domain: string) => {
       if (inFlightRef.current) return;
@@ -173,46 +201,38 @@ export function useGenLayer(network: NetworkKey) {
         setStatus('waiting');
 
         const receiptConfig = RECEIPT_CONFIG[network];
-        const receipt = await client.waitForTransactionReceipt({
+        // CONFIRMED PATTERN (Recourse, this project's own working
+        // reference — verified by reading its actual source, not
+        // assumed): do NOT parse anything out of the write receipt at
+        // all. Recourse's ActionForm/useGenLayer discard the receipt's
+        // contents entirely and just wait for the write to finish, then
+        // make a fresh readContract call to get the real state. The
+        // earlier receipt.result.return_value (then receipt.data.*)
+        // approach here was guessing at undocumented SDK internals —
+        // this sidesteps that question entirely by never needing it.
+        await client.waitForTransactionReceipt({
           hash: txHash,
           status: TransactionStatus.ACCEPTED,
           retries: receiptConfig.retries,
           interval: receiptConfig.interval,
         });
 
-        // NOTE ON THIS PARSING: genlayer-js's own README and docs
-        // confirm receipt.data is the correct top-level field (shown
-        // for deployContract as receipt.data?.contract_address across
-        // multiple independent official sources), never receipt.result
-        // — the earlier receipt.result.return_value here was an
-        // unverified guess and very likely why results never rendered
-        // in production. No official example shows the exact field
-        // name for a WRITE call's return value inside receipt.data
-        // specifically (only the deploy case is documented), so this
-        // checks a few plausible field names defensively rather than
-        // betting on a single unverified guess a second time. If none
-        // match, the raw receipt is logged so the real shape can be
-        // read directly from devtools on the next attempt, instead of
-        // failing silently the way the previous version did.
-        const data = (receipt as { data?: Record<string, unknown> })?.data;
-        const returnValue =
-          (data?.return_value as string | undefined) ??
-          (data?.result as string | undefined) ??
-          (data?.execution_result as string | undefined) ??
-          ((data?.eq_outputs as { return?: string }[] | undefined)?.[0]?.return);
-
-        if (typeof returnValue === 'string') {
-          try {
-            const parsed = JSON.parse(returnValue) as CheckResult;
-            setLastResult(parsed);
-          } catch {
-            console.warn('StandardCheck: returnValue was not valid JSON:', returnValue);
-          }
+        // Read the record back via the confirmed Recourse pattern:
+        // get_next_id() AFTER the write completes (race-safe under
+        // concurrent submissions — see comment above), then
+        // get_record() on next_id - 1.
+        const nextId = await readNextId();
+        const myId = nextId - 1;
+        const record = await readRecord(myId);
+        if (record) {
+          setLastResult({
+            attestation_id: record.attestation_id,
+            domain: record.domain,
+            verdict: record.verdict,
+          });
         } else {
           console.warn(
-            'StandardCheck: could not find a return value in the receipt. ' +
-              'Full receipt for debugging:',
-            receipt
+            `StandardCheck: get_record(${myId}) returned nothing after a successful write.`
           );
         }
         setStatus('done');
@@ -223,23 +243,7 @@ export function useGenLayer(network: NetworkKey) {
         inFlightRef.current = false;
       }
     },
-    [account, network]
-  );
-
-  const readRecord = useCallback(
-    async (attestationId: number) => {
-      const cfg = CHAIN_CONFIGS[network];
-      if (!cfg.contractAddress) return null;
-      const client = createClient({ chain: CHAIN_OBJECTS[network] });
-      const raw = await client.readContract({
-        address: cfg.contractAddress as `0x${string}`,
-        functionName: 'get_record',
-        args: [attestationId],
-      });
-      // readContract returns a JSON string — always parse it.
-      return JSON.parse(raw as string);
-    },
-    [network]
+    [account, network, readNextId, readRecord]
   );
 
   return {
