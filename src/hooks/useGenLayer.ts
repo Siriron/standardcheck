@@ -180,11 +180,40 @@ export function useGenLayer(network: NetworkKey) {
           interval: receiptConfig.interval,
         });
 
-        const returnValue = (receipt as { result?: { return_value?: string } })?.result
-          ?.return_value;
-        if (returnValue) {
-          const parsed = JSON.parse(returnValue) as CheckResult;
-          setLastResult(parsed);
+        // NOTE ON THIS PARSING: genlayer-js's own README and docs
+        // confirm receipt.data is the correct top-level field (shown
+        // for deployContract as receipt.data?.contract_address across
+        // multiple independent official sources), never receipt.result
+        // — the earlier receipt.result.return_value here was an
+        // unverified guess and very likely why results never rendered
+        // in production. No official example shows the exact field
+        // name for a WRITE call's return value inside receipt.data
+        // specifically (only the deploy case is documented), so this
+        // checks a few plausible field names defensively rather than
+        // betting on a single unverified guess a second time. If none
+        // match, the raw receipt is logged so the real shape can be
+        // read directly from devtools on the next attempt, instead of
+        // failing silently the way the previous version did.
+        const data = (receipt as { data?: Record<string, unknown> })?.data;
+        const returnValue =
+          (data?.return_value as string | undefined) ??
+          (data?.result as string | undefined) ??
+          (data?.execution_result as string | undefined) ??
+          ((data?.eq_outputs as { return?: string }[] | undefined)?.[0]?.return);
+
+        if (typeof returnValue === 'string') {
+          try {
+            const parsed = JSON.parse(returnValue) as CheckResult;
+            setLastResult(parsed);
+          } catch {
+            console.warn('StandardCheck: returnValue was not valid JSON:', returnValue);
+          }
+        } else {
+          console.warn(
+            'StandardCheck: could not find a return value in the receipt. ' +
+              'Full receipt for debugging:',
+            receipt
+          );
         }
         setStatus('done');
       } catch (err) {
