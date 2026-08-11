@@ -20,8 +20,8 @@ export function RecentChecks({ entries, explorerUrl, contractAddress }: RecentCh
   if (entries.length === 0) {
     return (
       <div className="text-ink-soft text-sm font-mono border border-dashed border-ink/15 rounded-lg px-4 py-6 text-center">
-        No checks yet this session. Run one above — it will appear here once it
-        finalizes.
+        No checks yet on this device. Run one above — it will appear here
+        once it finalizes, and stay here across refreshes.
       </div>
     );
   }
