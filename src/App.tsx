@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useGenLayer } from './hooks/useGenLayer';
+import { usePersistedRecent } from './hooks/usePersistedRecent';
 import { CHAIN_CONFIGS, type NetworkKey } from './config/chains';
 import { TerminalScan } from './components/TerminalScan';
 import { NetworkToggle } from './components/NetworkToggle';
@@ -21,7 +22,7 @@ interface RecentEntry {
 export default function App() {
   const [network, setNetwork] = useState<NetworkKey>('studionet');
   const [domain, setDomain] = useState('');
-  const [recent, setRecent] = useState<RecentEntry[]>([]);
+  const { recent, addEntry } = usePersistedRecent<RecentEntry>(network);
   const { account, status, error, lastResult, lastTxHash, connect, checkDomain } =
     useGenLayer(network);
   const cfg = CHAIN_CONFIGS[network];
@@ -32,10 +33,17 @@ export default function App() {
     checkDomain(clean);
   }, [domain, checkDomain]);
 
-  // Append the finalized result to session history once it lands.
-  if (lastResult && !recent.some((r) => r.attestation_id === lastResult.attestation_id)) {
-    setRecent((prev) => [lastResult, ...prev].slice(0, 8));
-  }
+  // Persist the finalized result to this network's history once it
+  // lands. Moved into an effect (was previously a direct setState call
+  // in the render body, guarded by a condition) — that pattern happened
+  // to work but is fragile; a proper effect is the correct place for a
+  // side effect triggered by a prop/state change.
+  useEffect(() => {
+    if (lastResult) {
+      addEntry(lastResult);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastResult]);
 
   return (
     <div className="min-h-screen bg-paper text-ink font-body">
@@ -159,7 +167,9 @@ export default function App() {
       </section>
 
       {/* ---------------------------------------------------------- */}
-      {/* Recent checks (session-local, per documented gap)          */}
+      {/* Recent checks (localStorage-persisted per network, not      */}
+      {/* on-chain — see contracts.md's known-gaps note on why there's */}
+      {/* no on-chain domain index)                                   */}
       {/* ---------------------------------------------------------- */}
       <section className="max-w-5xl mx-auto px-5 sm:px-8 py-16 sm:py-20 border-t border-ink/10">
         <motion.h2
@@ -169,7 +179,7 @@ export default function App() {
           variants={fadeUp}
           className="font-display text-2xl sm:text-3xl font-semibold tracking-tight mb-6"
         >
-          This session's checks
+          Your checks on this device
         </motion.h2>
         <RecentChecks entries={recent} explorerUrl={cfg.explorerUrl} contractAddress={cfg.contractAddress} />
       </section>
@@ -236,7 +246,7 @@ export default function App() {
           <p>
             This deliberately has no separate submit-then-resolve lifecycle to test —
             every check is a single write call that fetches, judges, and finalizes in
-            one transaction. See <a href="./docs/deployment.md" className="underline underline-offset-2 hover:text-ink">deployment.md</a> for what has and hasn't been live-verified yet.
+            one transaction. See <a href="https://github.com/Siriron/standardcheck/blob/main/docs/deployment.md" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-ink">deployment.md</a> on GitHub for what has and hasn't been live-verified yet.
           </p>
         </motion.div>
       </section>
