@@ -66,6 +66,22 @@ interface CheckResult {
   verdict: 'conformant' | 'non_conformant' | 'unverifiable';
 }
 
+// The contract's check_domain returns json.dumps({"attestation_id", ...})
+// as a plain string. debugTraceTransaction's return_data is documented
+// (docs.genlayer.com/api-references/genlayer-js/transactions) as
+// hex-encoded contract return data — decode the hex to UTF-8 text, then
+// parse the JSON, rather than assuming a shape.
+function decodeHexReturnValue(hex: string): unknown {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (clean.length === 0) return null;
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+  }
+  const text = new TextDecoder('utf-8').decode(bytes);
+  return JSON.parse(text);
+}
+
 export function useGenLayer(network: NetworkKey) {
   const [account, setAccount] = useState<string | null>(null);
   const [status, setStatus] = useState<VerdictStatus>('idle');
@@ -134,17 +150,72 @@ export function useGenLayer(network: NetworkKey) {
     [network]
   );
 
-  const readNextId = useCallback(async (): Promise<number> => {
-    const cfg = CHAIN_CONFIGS[network];
-    const client = createClient({ chain: CHAIN_OBJECTS[network] });
-    const raw = await client.readContract({
-      address: cfg.contractAddress as `0x${string}`,
-      functionName: 'get_next_id',
-      args: [],
-    });
-    const { next_id } = JSON.parse(raw as string) as { next_id: number };
-    return next_id;
-  }, [network]);
+  // Reads back check_domain's OWN decoded return value from the caller's
+  // own transaction hash — never a separate get_next_id() guess. This is
+  // "receipt decoding... bound to the attestation ID produced by the
+  // caller's own check_domain transaction," per the steward's request:
+  // debugTraceTransaction is scoped to a single, specific tx hash (this
+  // caller's, and only this caller's), so a second concurrent submission
+  // from a different account can never change what this call resolves
+  // to — there is no shared counter to race against.
+  const decodeWriteResult = useCallback(
+    async (txHash: string): Promise<CheckResult> => {
+      const cfg = CHAIN_CONFIGS[network];
+      const client = createClient({ chain: CHAIN_OBJECTS[network] });
+      const trace = await client.debugTraceTransaction({ hash: txHash as `0x${string}` });
+      // result_code: 0 = success, 1 = user error, 2 = VM error — per
+      // docs.genlayer.com/api-references/genlayer-js/transactions.
+      // Consensus reaching ACCEPTED does not by itself guarantee
+      // execution succeeded; check this explicitly rather than trusting
+      // the write status alone.
+      if (trace.result_code !== 0) {
+        throw new Error(
+          `Transaction ${txHash} reached consensus but execution did not succeed ` +
+            `(result_code ${trace.result_code}). ${trace.stderr ? `stderr: ${trace.stderr}` : ''}`
+        );
+      }
+      const decoded = decodeHexReturnValue(trace.return_data) as {
+        attestation_id: number;
+        domain: string;
+        verdict: CheckResult['verdict'];
+      };
+      if (
+        typeof decoded?.attestation_id !== 'number' ||
+        typeof decoded?.domain !== 'string' ||
+        typeof decoded?.verdict !== 'string'
+      ) {
+        throw new Error(
+          `Decoded return value from ${txHash} did not match the expected check_domain shape.`
+        );
+      }
+      // Cross-check: confirm the decoded id genuinely resolves to a
+      // stored record for THIS domain via get_record, on the same
+      // network/address the write went to. This is what actually
+      // guards against a bad decode that happens to type-check —
+      // attestation_id alone can't be trusted just because it parsed.
+      if (!cfg.contractAddress) {
+        throw new Error(`No contract address configured for ${cfg.label}.`);
+      }
+      const rawRecord = await client.readContract({
+        address: cfg.contractAddress as `0x${string}`,
+        functionName: 'get_record',
+        args: [decoded.attestation_id],
+      });
+      const record = JSON.parse(rawRecord as string) as { domain?: string };
+      if (record.domain !== decoded.domain) {
+        throw new Error(
+          `get_record(${decoded.attestation_id}) returned domain "${record.domain}", ` +
+            `expected "${decoded.domain}" from this transaction's own return value.`
+        );
+      }
+      return {
+        attestation_id: decoded.attestation_id,
+        domain: decoded.domain,
+        verdict: decoded.verdict,
+      };
+    },
+    [network]
+  );
 
   const checkDomain = useCallback(
     async (domain: string) => {
@@ -201,15 +272,6 @@ export function useGenLayer(network: NetworkKey) {
         setStatus('waiting');
 
         const receiptConfig = RECEIPT_CONFIG[network];
-        // CONFIRMED PATTERN (Recourse, this project's own working
-        // reference — verified by reading its actual source, not
-        // assumed): do NOT parse anything out of the write receipt at
-        // all. Recourse's ActionForm/useGenLayer discard the receipt's
-        // contents entirely and just wait for the write to finish, then
-        // make a fresh readContract call to get the real state. The
-        // earlier receipt.result.return_value (then receipt.data.*)
-        // approach here was guessing at undocumented SDK internals —
-        // this sidesteps that question entirely by never needing it.
         await client.waitForTransactionReceipt({
           hash: txHash,
           status: TransactionStatus.ACCEPTED,
@@ -217,24 +279,13 @@ export function useGenLayer(network: NetworkKey) {
           interval: receiptConfig.interval,
         });
 
-        // Read the record back via the confirmed Recourse pattern:
-        // get_next_id() AFTER the write completes (race-safe under
-        // concurrent submissions — see comment above), then
-        // get_record() on next_id - 1.
-        const nextId = await readNextId();
-        const myId = nextId - 1;
-        const record = await readRecord(myId);
-        if (record) {
-          setLastResult({
-            attestation_id: record.attestation_id,
-            domain: record.domain,
-            verdict: record.verdict,
-          });
-        } else {
-          console.warn(
-            `StandardCheck: get_record(${myId}) returned nothing after a successful write.`
-          );
-        }
+        // Decode THIS transaction's own return value — never a shared
+        // counter read after the fact. Race-safe by construction: the
+        // lookup is scoped to txHash, which only ever refers to this
+        // caller's own call, regardless of what anyone else submits
+        // concurrently. See decodeWriteResult above.
+        const result = await decodeWriteResult(txHash);
+        setLastResult(result);
         setStatus('done');
       } catch (err) {
         setError(err instanceof Error ? err.message : 'The transaction did not complete.');
@@ -243,7 +294,7 @@ export function useGenLayer(network: NetworkKey) {
         inFlightRef.current = false;
       }
     },
-    [account, network, readNextId, readRecord]
+    [account, network, decodeWriteResult]
   );
 
   return {
@@ -255,5 +306,6 @@ export function useGenLayer(network: NetworkKey) {
     connect,
     checkDomain,
     readRecord,
+    decodeWriteResult,
   };
 }
