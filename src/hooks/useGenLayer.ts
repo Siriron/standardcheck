@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from 'genlayer-js';
 import { studionet, testnetBradbury } from 'genlayer-js/chains';
-import { TransactionStatus } from 'genlayer-js/types';
+import { TransactionStatus, type Hash } from 'genlayer-js/types';
 import { CHAIN_CONFIGS, RECEIPT_CONFIG, type NetworkKey } from '../config/chains';
 
 const CHAIN_OBJECTS = {
@@ -159,10 +159,10 @@ export function useGenLayer(network: NetworkKey) {
   // from a different account can never change what this call resolves
   // to — there is no shared counter to race against.
   const decodeWriteResult = useCallback(
-    async (txHash: string): Promise<CheckResult> => {
+    async (txHash: Hash): Promise<CheckResult> => {
       const cfg = CHAIN_CONFIGS[network];
       const client = createClient({ chain: CHAIN_OBJECTS[network] });
-      const trace = await client.debugTraceTransaction({ hash: txHash as `0x${string}` });
+      const trace = await client.debugTraceTransaction({ hash: txHash });
       // result_code: 0 = success, 1 = user error, 2 = VM error — per
       // docs.genlayer.com/api-references/genlayer-js/transactions.
       // Consensus reaching ACCEPTED does not by itself guarantee
